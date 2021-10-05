@@ -1,0 +1,194 @@
+---
+title: "CHI'21 from htmls to kwic"
+author: "Olga Iarygina"
+output: 
+  html_document:
+    code_folding: show
+    theme: cosmo
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r echo = FALSE}
+library(textreadr)
+library(stringr)
+library(tidyverse)
+library(quanteda)
+library(tm)
+library(tidytext)
+```
+
+#### html to text
+
+First of all, I transformed HTMLs into plain text using just one quite widespread function written by Tony Breyal from here: https://github.com/tonybreyal/Blog-Reference-Functions/blob/master/R/htmlToText/htmlToText.R
+
+```{r echo = FALSE}
+# found on github
+
+htmlToText <- function(input, ...) {
+  ###---PACKAGES ---###
+  require(RCurl)
+  require(XML)
+  
+  
+  ###--- LOCAL FUNCTIONS ---###
+  # Determine how to grab html for a single input element
+  evaluate_input <- function(input) {    
+    # if input is a .html file
+    if(file.exists(input)) {
+      char.vec <- readLines(input, warn = FALSE)
+      return(paste(char.vec, collapse = ""))
+    }
+    
+    # if input is html text
+    if(grepl("</html>", input, fixed = TRUE)) return(input)
+    
+    # if input is a URL, probably should use a regex here instead?
+    if(!grepl(" ", input)) {
+      # downolad SSL certificate in case of https problem
+      if(!file.exists("cacert.perm")) download.file(url="http://curl.haxx.se/ca/cacert.pem", destfile="cacert.perm")
+      return(getURL(input, followlocation = TRUE, cainfo = "cacert.perm"))
+    }
+    
+    # return NULL if none of the conditions above apply
+    return(NULL)
+  }
+  
+  # convert HTML to plain text
+  convert_html_to_text <- function(html) {
+    doc <- htmlParse(html, asText = TRUE)
+    text <- xpathSApply(doc, "//text()[not(ancestor::script)][not(ancestor::style)][not(ancestor::noscript)][not(ancestor::form)]", xmlValue)
+    return(text)
+  }
+  
+  # format text vector into one character string
+  collapse_text <- function(txt) {
+    return(paste(txt, collapse = " "))
+  }
+  
+  ###--- MAIN ---###
+  # STEP 1: Evaluate input
+  html.list <- lapply(input, evaluate_input)
+  
+  # STEP 2: Extract text from HTML
+  text.list <- lapply(html.list, convert_html_to_text)
+  
+  # STEP 3: Return text
+  text.vector <- sapply(text.list, collapse_text)
+  return(text.vector)
+}
+```
+
+Then I actually use this function to transform HTMLs to text.
+Here you should have 746 papers.
+
+```{r}
+# corpus creation 
+
+# get data
+# setwd("chi21_html/")
+html <- list.files(pattern="\\.(htm|html)$") # get just .htm and .html files
+
+# convert HTML to text
+html2txt <- lapply(html, htmlToText)
+
+# clean out non-ASCII characters
+html2txtclean <- sapply(html2txt, function(x) iconv(x, "latin1", "ASCII", sub=""))
+```
+
+And now, I create the corpus from all the papers.
+
+```{r}
+# corpus creation, assigning doi`s as text names
+doi = substr(html, 1, nchar(html) - 5) # here I just remove extention name
+corp = corpus(html2txtclean, docnames = doi)
+
+# instead of converting text to lowercase, I realized that uppercased letters could be useful for removing references, for example
+# and in keywords extraction we can use 'case_insensitive' instead of 'str_to_lower(corp)'
+
+# summary(corp)
+save(corp, file = "chi21_theor_html_corpus.RData")
+```
+
+#### 'theor' context extraction (sentences, without references)
+
+Then, to move to further analysis, we decided to remove references from the text in order not to capture the occurrences of stem 'theor' just from the references list.
+
+Skimming the papers, I found out that the CHI papers template has an uppercased "REFERENCES" title and just cut off the text that comes after the word "REFERENCES". I manually checked ~35 papers to see if anything crucial was accidentally removed, but for those 35, everything was fine. So, it seems like a working strategy. But it might be worth checking again.
+
+And then, for all the papers with references removed, I extracted all the sentences which contain the stem "theor". I got 2824 sentences.
+
+```{r}
+# references removing
+# I feel like this should be a valid approach since the template of ACM papers has uppercase headers
+corp <- gsub("REFERENCES.*", "", corp) 
+
+# context extraction
+kwic_sentence = corp %>% 
+  corpus_reshape(to = "sentences") %>% tokens() %>% 
+  kwic("theor", valuetype = "regex", case_insensitive = TRUE, window = 100)
+
+# Due to the specificity of the function, the docname it outputs also contains the position of the stem in the text. In order to make it convenient to work with the corpus later, I cut this docname to just doi
+
+# removing the extension from docnames
+kwic_sentence$docname = substr(kwic_sentence$docname, 1, 15)
+
+# write.csv(kwic_sentence, "kwic_sent.csv")
+```
+
+```{r}
+stats = kwic_sentence %>% group_by(docname) %>% summarise(n = n())
+# stats %>% filter(n > 1)
+
+summary(stats) %>% knitr::kable()
+```
+
+Some statistics:
+- 2824 occurrences of stem 'theor' overall
+- 449 papers
+- 318, where stem occurs more than once
+- max of 269 occurrences in one paper
+- 6.29 mean
+- 3 median
+
+### some additional stuff
+
+To make it convenient to go to the PDF from the spreadsheet with sentences, for each paper, I added a link to its PDF in Google Drive. I am not sure you will have access to this because I created this Google Drive folder, but you should. You will just need to set the path to the folder and to allow for the integration between R and your Gmail.
+
+```{r}
+# adding links to Google Drive
+
+library(googledrive)
+
+files = drive_ls(path = "~/chi21") # getting all names of the files in the Google Drive folder
+# (there are more files than papers because there is a folder with HTMLs and something else placed in this folder)
+files = files %>% mutate(link = drive_link(drive_resource)) # adding links
+files = files %>% select(name, link)
+files = files %>% filter(str_detect(name, ".pdf") == TRUE) # removing extra files, like accidentally created docx or folder with HTMLs
+files$name = substr(files$name, 1, nchar(files$name)-4) # removing the extensions from docnames
+```
+
+Now I transformed the file with sentences from kwic-format to just a simple dataframe, and added links there.
+
+```{r}
+# creation of not kwic, but a data frame with full sentences and links to papers
+
+whole = left_join(kwic_sentence, files, by = c("docname" = "name"))
+whole$full_sentence = paste(whole$pre, whole$keyword, whole$post, sep = " ") # combining words before 'theor' stem, stem and words after it into a single sentence
+
+# I just don't like reading with these white spaces before the coma, so I removed them as well
+library(qdapRegex)
+whole$full_sentence = rm_white_punctuation(whole$full_sentence)
+
+# cleaning the final view
+whole = as.data.frame(whole)
+whole$place = whole$from
+whole = whole %>% select(docname, link, place, keyword, full_sentence)
+
+# write_csv(whole, "theory_sentence_new.csv")
+```
+
